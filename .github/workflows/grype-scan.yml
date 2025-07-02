@@ -1,0 +1,39 @@
+name: Grype CVE Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  grype-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Build JAR
+        run: ./mvnw package -DskipTests
+
+      - name: Build Docker image
+        run: docker build -t petclinic-fat .
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Scan Docker image
+        run: grype petclinic-fat -o table > grype-report.txt
+
+      - name: Upload Grype Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: grype-cve-report
+          path: grype-report.txt
