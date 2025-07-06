@@ -1,4 +1,4 @@
-name: Grype CVE Scan
+name: Grype CVE Scan with SBOM
 
 on:
   push:
@@ -9,6 +9,7 @@ on:
 jobs:
   grype-scan:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -29,11 +30,20 @@ jobs:
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
-      - name: Scan Docker image
+      - name: Generate CVE Report (table)
         run: grype petclinic-fat -o table > grype-report.txt
 
-      - name: Upload Grype Report
+      - name: Generate SBOM (CycloneDX)
+        run: grype petclinic-fat -o cyclonedx > grype-sbom.json
+
+      - name: Upload CVE Report
         uses: actions/upload-artifact@v4
         with:
           name: grype-cve-report
           path: grype-report.txt
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-sbom
+          path: grype-sbom.json
