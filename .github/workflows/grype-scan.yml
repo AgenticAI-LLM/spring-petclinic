@@ -40,7 +40,7 @@ jobs:
 
       - name: Upload Semgrep SARIF to GitHub Code Scanning (optional)
         # uploads SARIF to GitHub code scanning (GitHub Advanced Security must be enabled to surface alerts)
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
           category: semgrep
