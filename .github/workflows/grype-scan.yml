@@ -1,4 +1,4 @@
-name: Grype CVE Scan with SBOM and Docker Push
+name: Grype CVE Scan with SAST (Semgrep) + SBOM + Docker Push
 
 on:
   push:
@@ -18,6 +18,44 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # --------------------------
+      # SAST: Semgrep (open-source)
+      # --------------------------
+      - name: Set up Python (for semgrep)
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Install Semgrep
+        run: pip install --upgrade semgrep
+
+      - name: Run Semgrep (SAST) — produce SARIF + JSON
+        id: run_semgrep
+        run: |
+          # run semgrep scan and write SARIF + JSON (do not hard-fail the job on findings)
+          semgrep scan --config=auto --sarif-output=semgrep.sarif --json-output=semgrep.json . || true
+          # ensure files exist so upload steps don't fail
+          test -f semgrep.sarif || echo '{}' > semgrep.sarif
+          test -f semgrep.json  || echo '[]'  > semgrep.json
+
+      - name: Upload Semgrep SARIF to GitHub Code Scanning (optional)
+        # uploads SARIF to GitHub code scanning (GitHub Advanced Security must be enabled to surface alerts)
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      - name: Upload Semgrep artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: |
+            semgrep.sarif
+            semgrep.json
+
+      # --------------------------
+      # Build application
+      # --------------------------
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -27,9 +65,26 @@ jobs:
       - name: Build JAR
         run: ./mvnw package -DskipTests
 
+      # --------------------------
+      # Build Docker image (capture IMAGE_ID)
+      # --------------------------
       - name: Build Docker image
-        run: docker build -t $IMAGE_NAME:$IMAGE_TAG .
+        id: build_image
+        run: |
+          docker build -t $IMAGE_NAME:$IMAGE_TAG .
+          # retrieve expanded (no-trunc) image id
+          IMAGE_ID=$(docker images --no-trunc -q $IMAGE_NAME:$IMAGE_TAG)
+          echo "IMAGE_ID=$IMAGE_ID" >> $GITHUB_OUTPUT
+        shell: bash
 
+      - name: Show built image details
+        run: |
+          echo "Image name: $IMAGE_NAME:$IMAGE_TAG"
+          echo "Local image id: ${{ steps.build_image.outputs.IMAGE_ID }}"
+
+      # --------------------------
+      # Push Docker image to Docker Hub
+      # --------------------------
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -37,8 +92,22 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Push image to Docker Hub
-        run: docker push $IMAGE_NAME:$IMAGE_TAG
+        id: push_image
+        run: |
+          docker push $IMAGE_NAME:$IMAGE_TAG
+          # after push, get repo digest (username/repo@sha256:...)
+          IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_NAME:$IMAGE_TAG || true)
+          echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> $GITHUB_OUTPUT
+        shell: bash
 
+      - name: Print pushed image info
+        run: |
+          echo "Pushed: $IMAGE_NAME:$IMAGE_TAG"
+          echo "Image digest: ${{ steps.push_image.outputs.IMAGE_DIGEST }}"
+
+      # --------------------------
+      # Install Grype and scan pushed image
+      # --------------------------
       - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
@@ -46,17 +115,25 @@ jobs:
       - name: Generate CVE Report (table)
         run: grype $IMAGE_NAME:$IMAGE_TAG -o table > grype-report.txt
 
-      - name: Generate SBOM (CycloneDX)
+      - name: Generate SBOM (CycloneDX JSON)
         run: grype $IMAGE_NAME:$IMAGE_TAG -o cyclonedx > grype-sbom.json
 
-      - name: Upload CVE Report
+      - name: Upload Grype CVE Report
         uses: actions/upload-artifact@v4
         with:
           name: grype-cve-report
           path: grype-report.txt
 
-      - name: Upload SBOM
+      - name: Upload Grype SBOM
         uses: actions/upload-artifact@v4
         with:
           name: grype-sbom
           path: grype-sbom.json
+
+      # optional: print summary
+      - name: Summary
+        run: |
+          echo "Semgrep SARIF: semgrep.sarif"
+          echo "Grype report: grype-report.txt"
+          echo "SBOM: grype-sbom.json"
+          echo "Image name: $IMAGE_NAME:$IMAGE_TAG (ID: ${{ steps.build_image.outputs.IMAGE_ID }})"
