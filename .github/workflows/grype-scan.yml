@@ -1,4 +1,4 @@
-name: Grype CVE Scan with SAST (Semgrep) + SBOM + Docker Push
+name: Security Pipeline (Grype + SBOM + Semgrep + CodeQL)
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-  grype-scan:
+  build-and-scan:
     runs-on: ubuntu-latest
 
     env:
@@ -15,47 +15,12 @@ jobs:
       IMAGE_TAG: latest
 
     steps:
+      # -------------------
+      # Checkout and Build
+      # -------------------
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # --------------------------
-      # SAST: Semgrep (open-source)
-      # --------------------------
-      - name: Set up Python (for semgrep)
-        uses: actions/setup-python@v4
-        with:
-          python-version: 3.11
-
-      - name: Install Semgrep
-        run: pip install --upgrade semgrep
-
-      - name: Run Semgrep (SAST) — produce SARIF + JSON
-        id: run_semgrep
-        run: |
-          # run semgrep scan and write SARIF + JSON (do not hard-fail the job on findings)
-          semgrep scan --config=auto --sarif-output=semgrep.sarif --json-output=semgrep.json . || true
-          # ensure files exist so upload steps don't fail
-          test -f semgrep.sarif || echo '{}' > semgrep.sarif
-          test -f semgrep.json  || echo '[]'  > semgrep.json
-
-      - name: Upload Semgrep SARIF to GitHub Code Scanning (optional)
-        # uploads SARIF to GitHub code scanning (GitHub Advanced Security must be enabled to surface alerts)
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep.sarif
-          category: semgrep
-
-      - name: Upload Semgrep artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-report
-          path: |
-            semgrep.sarif
-            semgrep.json
-
-      # --------------------------
-      # Build application
-      # --------------------------
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -65,26 +30,12 @@ jobs:
       - name: Build JAR
         run: ./mvnw package -DskipTests
 
-      # --------------------------
-      # Build Docker image (capture IMAGE_ID)
-      # --------------------------
       - name: Build Docker image
-        id: build_image
-        run: |
-          docker build -t $IMAGE_NAME:$IMAGE_TAG .
-          # retrieve expanded (no-trunc) image id
-          IMAGE_ID=$(docker images --no-trunc -q $IMAGE_NAME:$IMAGE_TAG)
-          echo "IMAGE_ID=$IMAGE_ID" >> $GITHUB_OUTPUT
-        shell: bash
+        run: docker build -t $IMAGE_NAME:$IMAGE_TAG .
 
-      - name: Show built image details
-        run: |
-          echo "Image name: $IMAGE_NAME:$IMAGE_TAG"
-          echo "Local image id: ${{ steps.build_image.outputs.IMAGE_ID }}"
-
-      # --------------------------
-      # Push Docker image to Docker Hub
-      # --------------------------
+      # -------------------
+      # Push to Docker Hub
+      # -------------------
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -92,48 +43,69 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Push image to Docker Hub
-        id: push_image
-        run: |
-          docker push $IMAGE_NAME:$IMAGE_TAG
-          # after push, get repo digest (username/repo@sha256:...)
-          IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_NAME:$IMAGE_TAG || true)
-          echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> $GITHUB_OUTPUT
-        shell: bash
+        run: docker push $IMAGE_NAME:$IMAGE_TAG
 
-      - name: Print pushed image info
-        run: |
-          echo "Pushed: $IMAGE_NAME:$IMAGE_TAG"
-          echo "Image digest: ${{ steps.push_image.outputs.IMAGE_DIGEST }}"
-
-      # --------------------------
-      # Install Grype and scan pushed image
-      # --------------------------
+      # -------------------
+      # Grype CVE + SBOM
+      # -------------------
       - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
-      - name: Generate CVE Report (table)
+      - name: Generate CVE Report
         run: grype $IMAGE_NAME:$IMAGE_TAG -o table > grype-report.txt
 
-      - name: Generate SBOM (CycloneDX JSON)
+      - name: Generate SBOM (CycloneDX)
         run: grype $IMAGE_NAME:$IMAGE_TAG -o cyclonedx > grype-sbom.json
 
-      - name: Upload Grype CVE Report
+      - name: Upload CVE Report
         uses: actions/upload-artifact@v4
         with:
           name: grype-cve-report
           path: grype-report.txt
 
-      - name: Upload Grype SBOM
+      - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
           name: grype-sbom
           path: grype-sbom.json
 
-      # optional: print summary
-      - name: Summary
-        run: |
-          echo "Semgrep SARIF: semgrep.sarif"
-          echo "Grype report: grype-report.txt"
-          echo "SBOM: grype-sbom.json"
-          echo "Image name: $IMAGE_NAME:$IMAGE_TAG (ID: ${{ steps.build_image.outputs.IMAGE_ID }})"
+      # -------------------
+      # SAST with Semgrep
+      # -------------------
+      - name: Run Semgrep (SAST)
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: "p/default"
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }} # optional, for cloud dashboard
+
+  # -------------------
+  # CodeQL SAST (fixed to v3)
+  # -------------------
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'java' ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
