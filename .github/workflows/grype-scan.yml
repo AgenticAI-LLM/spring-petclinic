@@ -28,7 +28,7 @@ jobs:
           java-version: 17
 
       - name: Build JAR
-        run: ./mvnw package -DskipTests
+        run: ./mvnw package -DskipTests -Dcheckstyle.skip
 
       - name: Build Docker image
         run: docker build -t $IMAGE_NAME:$IMAGE_TAG .
